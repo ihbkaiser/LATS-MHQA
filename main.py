@@ -17,8 +17,10 @@ from langchain_core.runnables import RunnableConfig
 from chat_models.gemini_chat_model import GeminiChatModel
 from chat_models.openai_chat_model import OpenAIChatModel
 from searchers.base_searcher import BaseSearcher
+from langchain.embeddings.openai import OpenAIEmbeddings
 from searchers.tavily_search import TavilySearcher
 from searchers.self_rag import SelfRAGSearcher
+from searchers.corrective_rag import CorrectiveRAGSearcher
 
 from prompts import (
     action_prompt,
@@ -135,7 +137,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--searcher",
-        choices=["tavily", "self-rag"],
+        choices=["tavily", "self-rag", "corrective-rag"],
         default="tavily",
         help="Searcher to use",
     )
@@ -405,10 +407,20 @@ if __name__ == '__main__':
             model_name='gemini-2.0-flash', temperature=0.0
         )  # type: ignore
 
+    # Initialize embeddings
+    embeddings = OpenAIEmbeddings()
+
     if args.searcher == 'tavily':  # type: ignore
         searcher: BaseSearcher = TavilySearcher(max_results=5)  # type: ignore
     elif args.searcher == 'self-rag':  # type: ignore
         searcher: BaseSearcher = SelfRAGSearcher(corpus_path="data/multihoprag_corpus.txt")
+    elif args.searcher == 'corrective-rag':  # type: ignore
+        searcher: BaseSearcher = CorrectiveRAGSearcher(
+            faiss_index_path="data/faiss_index",
+            corpus_path="data/multihoprag_corpus.txt",
+            llm=chat_model,
+            embeddings=embeddings,
+        )
 
     reflection_llm_chain = (
         reflection_prompt
