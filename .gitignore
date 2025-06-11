@@ -1,3 +1,4 @@
 *.sh
 *.env
+API.json
 __pycache__
