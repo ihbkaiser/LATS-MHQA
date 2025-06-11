@@ -383,6 +383,11 @@ def search(
         if leaf.depth <= MAX_HOP:
             expand(leaf, config, verbose)
         for child in leaf.children:
+            print(f"[Search] child score={child.reflection.score}")
+            if child.reflection.found_solution and child.reflection.score >= 8:
+                if verbose:
+                    print(f"[Early Stop] Found good solution at iter {i+1}, score={child.reflection.score}")
+                break
             if child.visits == 0:
                 simulate_and_backprop(child, config, verbose)
 
@@ -394,6 +399,59 @@ def search(
         )
     return best
 
+def initial_answer(searcher: BaseSearcher, question: str, config: RunnableConfig, verbose: bool = False) -> tuple[str, Reflection]:
+    """Generate initial answer using searcher and evaluate its quality."""
+    if verbose:
+        print("🔍 [Initial Answer] Generating initial answer...")
+    
+    # Retrieve documents
+    paras = searcher.retrieve(question)
+    docs = [Document(page_content=p) for p in paras]
+    
+    if verbose:
+        print(f"[Initial Answer] Retrieved {len(docs)} documents")
+    
+    # For initial answer, we have no history yet
+    history_msgs = []
+    evidence_msgs = [HumanMessage(content="No prior evidence available.")]
+    
+    # Generate answer using reader chain
+    resp = reader_chain.invoke(
+        {
+            "Question": [HumanMessage(content=question)],
+            "Paragraphs": [HumanMessage(content=d.page_content) for d in docs],
+            "Evidence": evidence_msgs,
+            "Question_history": history_msgs
+        },
+        config,
+    )
+    
+    initial_answer_text = strip_prefix(resp.content)
+    if verbose:
+        print(f"[Initial Answer] Generated: {initial_answer_text[:100]}...")
+    
+    # Evaluate the answer quality using reflection
+    # Create a simple question history with the answer
+    question_history = [HumanMessage(content=f"Answer: {initial_answer_text}")]
+    
+    refl_resp = reflection_llm_chain.invoke(
+        {
+            "Question": [HumanMessage(content=question)],
+            "Question_history": question_history
+        },
+        config,
+    )
+    
+    refl_obj = (
+        refl_resp[0]
+        if isinstance(refl_resp, list) and refl_resp
+        else Reflection(reflections="no evaluation", score=0, found_solution=False)
+    )
+    
+    if verbose:
+        print(f"[Initial Answer] Score: {refl_obj.score}/10, Found Solution: {refl_obj.found_solution}")
+    
+    return initial_answer_text, refl_obj
 
 if __name__ == '__main__':
     args = parse_args()
@@ -433,29 +491,45 @@ if __name__ == '__main__':
     reader_chain = reader_prompt | chat_model
     MAX_HOP = 5
 
-    root = Node(
-        [HumanMessage(content=QUESTION_TEXT)],
-        Reflection(reflections='init', score=0, found_solution=False),
-    )
     cfg = RunnableConfig()
-    best_node = search(root, cfg, budget=2, w=1.0, verbose=VERBOSE)  # type: ignore
+    
+    # Try initial answer first
+    print("Trying initial answer...")
+    initial_ans, initial_reflection = initial_answer(searcher, QUESTION_TEXT, cfg, VERBOSE)
+    
+    # Check if initial answer is good enough (score >= 7 or found_solution=True with score >= 5)
+    threshold_met = (initial_reflection.score >= 7) or (initial_reflection.found_solution and initial_reflection.score >= 5)
+    
+    if threshold_met:
+        print("Initial answer is good enough! Skipping MCTS...")
+        print(f"Score: {initial_reflection.score}/10, Found Solution: {initial_reflection.found_solution}")
+        print('===== Final Answer (Initial) =====')
+        print(initial_ans)
+    else:
+        print(f"Initial answer not sufficient (Score: {initial_reflection.score}/10). Running MCTS...")
+        
+        root = Node(
+            [HumanMessage(content=QUESTION_TEXT)],
+            Reflection(reflections='init', score=0, found_solution=False),
+        )
+        best_node = search(root, cfg, budget=2, w=1.0, verbose=VERBOSE)  # type: ignore
 
-    print('===== Best Trajectory =====')
-    for msg in best_node.get_trajectory():
-        print(f'- {strip_prefix(msg.content)}')
+        print('===== Best Trajectory =====')
+        for msg in best_node.get_trajectory():
+            print(f'- {strip_prefix(msg.content)}')
 
-    print('===== Final Answer =====')
-    final_msgs = best_node.simulation_retrieved_documents
-    history_msgs, evidence_msgs = format_history_and_evidence(
-        best_node.get_trajectory()
-    )
-    final = reader_chain.invoke(
-        {
-            'Question': [HumanMessage(content=QUESTION_TEXT)],
-            'Paragraphs': [HumanMessage(content=d.page_content) for d in final_msgs],
-            'Evidence': evidence_msgs,
-            'Question_history': history_msgs,
-        },
-        RunnableConfig(),
-    )
-    print(strip_prefix(final.content))
+        print('===== Final Answer (MCTS) =====')
+        final_msgs = best_node.simulation_retrieved_documents
+        history_msgs, evidence_msgs = format_history_and_evidence(
+            best_node.get_trajectory()
+        )
+        final = reader_chain.invoke(
+            {
+                'Question': [HumanMessage(content=QUESTION_TEXT)],
+                'Paragraphs': [HumanMessage(content=d.page_content) for d in final_msgs],
+                'Evidence': evidence_msgs,
+                'Question_history': history_msgs,
+            },
+            RunnableConfig(),
+        )
+        print(strip_prefix(final.content))
